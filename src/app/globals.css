@@ -1,0 +1,83 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+:root {
+  --color-blush: #F9C6C6;
+  --color-peach: #EFD6C5;
+  --color-olive: #9C8E5E;
+  --color-olive-dark: #887D47;
+  --color-cream: #FFF9F2;
+  --color-espresso: #332C25;
+  --color-white: #FFFFFF;
+}
+
+html {
+  background-color: var(--color-cream);
+  color: var(--color-espresso);
+  text-rendering: optimizeLegibility;
+  -webkit-font-smoothing: antialiased;
+}
+
+/* Lenis smooth scrolling core */
+html.lenis, html.lenis body {
+  height: auto;
+}
+
+.lenis.lenis-smooth {
+  scroll-behavior: auto !important;
+}
+
+.lenis.lenis-smooth [data-lenis-prevent] {
+  overscroll-behavior: contain;
+}
+
+.lenis.lenis-stopped {
+  overflow: hidden;
+}
+
+.lenis.lenis-smooth iframe {
+  pointer-events: none;
+}
+
+/* Custom selection styling */
+::selection {
+  background-color: #887D47;
+  color: #FFF9F2;
+}
+
+/* Custom scrollbar */
+::-webkit-scrollbar {
+  width: 8px;
+}
+::-webkit-scrollbar-track {
+  background: #FFF9F2;
+}
+::-webkit-scrollbar-thumb {
+  background: #EFD6C5;
+  border-radius: 4px;
+}
+::-webkit-scrollbar-thumb:hover {
+  background: #9C8E5E;
+}
+
+/* Text stroke utility for decorative editorial typography */
+.text-stroke-olive {
+  -webkit-text-stroke: 1.5px #887D47;
+  color: transparent;
+}
+
+.text-stroke-cream {
+  -webkit-text-stroke: 1.5px #FFF9F2;
+  color: transparent;
+}
+
+/* Clip paths for GSAP reveals */
+.clip-inset-full {
+  clip-path: inset(100% 0% 0% 0%);
+}
+
+.clip-inset-none {
+  clip-path: inset(0% 0% 0% 0%);
+}
+
