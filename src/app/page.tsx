@@ -12,26 +12,29 @@ import FinalCTA from "@/components/FinalCTA";
 import Footer from "@/components/Footer";
 import CartDrawer from "@/components/CartDrawer";
 import { CartProvider } from "@/context/CartContext";
+import { PreloadProvider } from "@/context/PreloadContext";
 
 export default function Home() {
   return (
-    <CartProvider>
-      <Preloader />
-      <main className="min-h-screen bg-brand-cream text-brand-espresso flex flex-col selection:bg-brand-olive-dark selection:text-brand-cream">
-        <Navbar />
-        <Hero />
-        <BrandIntro />
-        <SignatureMenu />
-        <BrandExperience />
-        <Philosophy />
-        <CustomerReviews />
-        <CafeMoment />
-        <SpecialMoment />
-        <FinalCTA />
-        <Footer />
-        <CartDrawer />
-      </main>
-    </CartProvider>
+    <PreloadProvider>
+      <CartProvider>
+        <Preloader />
+        <main className="min-h-screen bg-brand-cream text-brand-espresso flex flex-col selection:bg-brand-olive-dark selection:text-brand-cream">
+          <Navbar />
+          <Hero />
+          <BrandIntro />
+          <SignatureMenu />
+          <BrandExperience />
+          <Philosophy />
+          <CustomerReviews />
+          <CafeMoment />
+          <SpecialMoment />
+          <FinalCTA />
+          <Footer />
+          <CartDrawer />
+        </main>
+      </CartProvider>
+    </PreloadProvider>
   );
 }
 

@@ -5,6 +5,7 @@ import gsap from "gsap";
 import { ScrollTrigger } from "gsap/ScrollTrigger";
 import DecorativeSun from "./DecorativeSun";
 import CoffeeBeanSvg from "./CoffeeBeanSvg";
+import { usePreload } from "@/context/PreloadContext";
 
 const TOTAL_FRAMES = 850;
 
@@ -13,17 +14,18 @@ export default function Hero() {
   const stickyContainerRef = useRef<HTMLDivElement>(null);
   const canvasRef = useRef<HTMLCanvasElement>(null);
 
-  // Content layer
+  // Content layers
   const heroCardRef = useRef<HTMLDivElement>(null);
   const progressBarRef = useRef<HTMLDivElement>(null);
 
   const [currentFrame, setCurrentFrame] = useState(1);
-  const [loadingProgress, setLoadingProgress] = useState(0);
-  const [isFullyLoaded, setIsFullyLoaded] = useState(false);
+  const { setVideoProgress, setVideoReady, isPreloaderComplete } = usePreload();
 
   // Cached HTMLImageElement array
   const imagesRef = useRef<HTMLImageElement[]>([]);
   const currentFrameRef = useRef<number>(1);
+  const rafIdRef = useRef<number | null>(null);
+  const pendingFrameRef = useRef<number>(1);
 
   // Helper to format frame path
   const getFramePath = (index: number) => {
@@ -31,11 +33,11 @@ export default function Hero() {
     return `/hero-frames/frame_${padded}.jpg`;
   };
 
-  // Render a specific frame onto the canvas
-  const renderFrame = useCallback((frameIndex: number) => {
+  // Immediate draw on canvas
+  const drawOnCanvas = useCallback((frameIndex: number) => {
     const canvas = canvasRef.current;
     if (!canvas) return;
-    const ctx = canvas.getContext("2d");
+    const ctx = canvas.getContext("2d", { alpha: false });
     if (!ctx) return;
 
     const clamped = Math.max(1, Math.min(TOTAL_FRAMES, Math.round(frameIndex)));
@@ -79,9 +81,22 @@ export default function Hero() {
       x = (canvasWidth - renderWidth) / 2;
     }
 
-    ctx.clearRect(0, 0, canvasWidth, canvasHeight);
     ctx.drawImage(img, x, y, renderWidth, renderHeight);
   }, []);
+
+  // Batched frame render via rAF to ensure 60fps locked to display refresh
+  const renderFrame = useCallback(
+    (frameIndex: number) => {
+      pendingFrameRef.current = frameIndex;
+      if (rafIdRef.current !== null) return;
+
+      rafIdRef.current = requestAnimationFrame(() => {
+        drawOnCanvas(pendingFrameRef.current);
+        rafIdRef.current = null;
+      });
+    },
+    [drawOnCanvas]
+  );
 
   // Update canvas dimensions matching DPR
   const updateCanvasSize = useCallback(() => {
@@ -90,86 +105,120 @@ export default function Hero() {
     const dpr = Math.min(window.devicePixelRatio || 1, 2);
     const rect = canvas.getBoundingClientRect();
 
-    canvas.width = rect.width * dpr;
-    canvas.height = rect.height * dpr;
+    if (rect.width > 0 && rect.height > 0) {
+      canvas.width = rect.width * dpr;
+      canvas.height = rect.height * dpr;
+      drawOnCanvas(currentFrameRef.current);
+    }
+  }, [drawOnCanvas]);
 
-    renderFrame(currentFrameRef.current);
-  }, [renderFrame]);
-
-  // Progressive frame preloader for all 850 frames
+  // Progressive tiered frame loader connected to Preloader
   useEffect(() => {
     let isCancelled = false;
-    let loadedCount = 0;
-
     imagesRef.current = new Array(TOTAL_FRAMES + 1);
 
-    // 1. Immediately load Frame 1
+    // 1. Immediately load Frame 1 & paint canvas
     const firstImg = new Image();
     firstImg.src = getFramePath(1);
     firstImg.onload = () => {
       if (isCancelled) return;
       imagesRef.current[1] = firstImg;
-      renderFrame(1);
-      loadedCount++;
-      setLoadingProgress(Math.round((loadedCount / TOTAL_FRAMES) * 100));
+      drawOnCanvas(1);
     };
 
-    // 2. Preload in smart tiers:
-    // Tier A: Every 4th frame (rapid scrub coverage across all 850 frames)
-    // Tier B: Intermediate frames via parallel workers
-    const loadAllFrames = async () => {
-      const priorityQueue: number[] = [];
-      const intermediateQueue: number[] = [];
+    // 2. Build prioritized queues:
+    // Tier 1: Initial scrub sequence (frames 1 to 40)
+    // Tier 2: Keyframe stride (every 3rd frame: 42, 45, 48... up to 850)
+    // Tier 3: All intermediate frames (loaded continuously in background)
+    const tier1: number[] = [];
+    for (let i = 2; i <= 40; i++) {
+      tier1.push(i);
+    }
 
-      for (let i = 2; i <= TOTAL_FRAMES; i++) {
-        if (i % 4 === 0) {
-          priorityQueue.push(i);
-        } else {
-          intermediateQueue.push(i);
-        }
+    const tier2: number[] = [];
+    for (let i = 42; i <= TOTAL_FRAMES; i += 3) {
+      tier2.push(i);
+    }
+
+    const tier3: number[] = [];
+    for (let i = 41; i <= TOTAL_FRAMES; i++) {
+      if (i % 3 !== 0) {
+        tier3.push(i);
       }
+    }
 
-      const fullQueue = [...priorityQueue, ...intermediateQueue];
-      const concurrency = 6;
+    const criticalQueue = [...tier1, ...tier2];
+    const totalCritical = criticalQueue.length;
+    let criticalLoaded = 0;
 
-      const worker = async () => {
-        while (fullQueue.length > 0 && !isCancelled) {
-          const idx = fullQueue.shift();
-          if (!idx) break;
+    // Helper to fetch a single frame with retry
+    const loadSingleImage = (idx: number): Promise<void> => {
+      return new Promise<void>((resolve) => {
+        if (imagesRef.current[idx]?.complete) {
+          resolve();
+          return;
+        }
+        const img = new Image();
+        img.src = getFramePath(idx);
+        img.onload = () => {
+          if (!isCancelled) {
+            imagesRef.current[idx] = img;
+          }
+          resolve();
+        };
+        img.onerror = () => resolve();
+      });
+    };
 
-          await new Promise<void>((resolve) => {
-            const img = new Image();
-            img.src = getFramePath(idx);
-            img.onload = () => {
-              if (!isCancelled) {
-                imagesRef.current[idx] = img;
-                loadedCount++;
-                if (loadedCount % 20 === 0 || loadedCount === TOTAL_FRAMES) {
-                  setLoadingProgress(Math.round((loadedCount / TOTAL_FRAMES) * 100));
-                }
-              }
-              resolve();
-            };
-            img.onerror = () => resolve();
-          });
+    // Worker pool for high concurrency
+    const runWorkerPool = async (queue: number[], concurrency: number, onEach?: () => void) => {
+      const runWorker = async () => {
+        while (queue.length > 0 && !isCancelled) {
+          const idx = queue.shift();
+          if (idx === undefined) break;
+          await loadSingleImage(idx);
+          if (onEach && !isCancelled) {
+            onEach();
+          }
         }
       };
 
-      const workers = Array.from({ length: concurrency }, () => worker());
+      const workers = Array.from({ length: concurrency }, () => runWorker());
       await Promise.all(workers);
+    };
+
+    const loadExperience = async () => {
+      // Load critical buffer with high concurrency
+      await runWorkerPool(criticalQueue, 14, () => {
+        criticalLoaded++;
+        const pct = Math.min(100, Math.round((criticalLoaded / totalCritical) * 100));
+        setVideoProgress(pct);
+      });
+
+      if (isCancelled) return;
+
+      // Critical frames ready! Tell preloader it's safe to lift curtain
+      setVideoReady(true);
+      drawOnCanvas(1);
+      ScrollTrigger.refresh();
+
+      // Background fill-in for remaining frames (lower concurrency so browser stays light)
+      await runWorkerPool(tier3, 6);
 
       if (!isCancelled) {
-        setIsFullyLoaded(true);
         ScrollTrigger.refresh();
       }
     };
 
-    loadAllFrames();
+    loadExperience();
 
     return () => {
       isCancelled = true;
+      if (rafIdRef.current !== null) {
+        cancelAnimationFrame(rafIdRef.current);
+      }
     };
-  }, [renderFrame]);
+  }, [drawOnCanvas, setVideoProgress, setVideoReady]);
 
   // Handle window resize
   useEffect(() => {
@@ -178,7 +227,7 @@ export default function Hero() {
     return () => window.removeEventListener("resize", updateCanvasSize);
   }, [updateCanvasSize]);
 
-  // Setup ScrollTrigger on the 700vh sticky container
+  // Setup ScrollTrigger on the 700vh sticky container with tight scrub
   useEffect(() => {
     gsap.registerPlugin(ScrollTrigger);
 
@@ -193,7 +242,7 @@ export default function Hero() {
         trigger: outerWrapperRef.current,
         start: "top top",
         end: "bottom bottom",
-        scrub: 0.8,
+        scrub: 0.15, // Tight sync with Lenis smooth scroll
         onUpdate: (self) => {
           // Map 0 -> 1 progress to 1 -> 850 frames
           const targetFrame = Math.round(
@@ -207,7 +256,6 @@ export default function Hero() {
           }
 
           // Initial Hero Card fades out gracefully as scrolling starts (0.0 -> 0.15)
-          // No cards in between so the entire footage is 100% pure cinematic view!
           if (heroCardRef.current) {
             if (self.progress < 0.16) {
               const opacity = Math.max(0, 1 - self.progress / 0.12);
@@ -222,17 +270,26 @@ export default function Hero() {
         },
       });
 
-      setTimeout(() => {
+      const timer = setTimeout(() => {
         ScrollTrigger.refresh();
-      }, 400);
+      }, 500);
 
       return () => {
+        clearTimeout(timer);
         scrollTriggerInstance.kill();
       };
     }, outerWrapperRef);
 
     return () => ctx.revert();
   }, [renderFrame]);
+
+  // Whenever preloader finishes, refresh ScrollTrigger and trigger redraw
+  useEffect(() => {
+    if (isPreloaderComplete) {
+      updateCanvasSize();
+      ScrollTrigger.refresh();
+    }
+  }, [isPreloaderComplete, updateCanvasSize]);
 
   return (
     // Outer scroll track: 700vh ensures all 850 frames play through completely before unlocking next section

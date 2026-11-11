@@ -11,18 +11,19 @@ export default function SmoothScroll({ children }: { children: React.ReactNode }
   useEffect(() => {
     gsap.registerPlugin(ScrollTrigger);
 
-    // Initialize Lenis
+    // Initialize Lenis with smooth physics
     const lenis = new Lenis({
-      duration: 1.2,
+      duration: 1.15,
       easing: (t) => Math.min(1, 1.001 - Math.pow(2, -10 * t)),
       orientation: "vertical",
       gestureOrientation: "vertical",
       smoothWheel: true,
-      wheelMultiplier: 1,
-      touchMultiplier: 1.5,
+      wheelMultiplier: 0.95,
+      touchMultiplier: 1.6,
     });
 
     lenisRef.current = lenis;
+    (window as any).__lenis = lenis;
 
     // Connect Lenis scroll to ScrollTrigger
     lenis.on("scroll", ScrollTrigger.update);
@@ -39,7 +40,12 @@ export default function SmoothScroll({ children }: { children: React.ReactNode }
     const handleAnchorClick = (e: MouseEvent) => {
       const target = e.target as HTMLElement | null;
       const anchor = target?.closest("a");
-      if (anchor && anchor.hash && anchor.hash.startsWith("#") && anchor.pathname === window.location.pathname) {
+      if (
+        anchor &&
+        anchor.hash &&
+        anchor.hash.startsWith("#") &&
+        anchor.pathname === window.location.pathname
+      ) {
         e.preventDefault();
         const targetElement = document.querySelector(anchor.hash);
         if (targetElement) {
@@ -56,6 +62,7 @@ export default function SmoothScroll({ children }: { children: React.ReactNode }
     return () => {
       document.removeEventListener("click", handleAnchorClick);
       gsap.ticker.remove(tickerCallback);
+      delete (window as any).__lenis;
       lenis.destroy();
       ScrollTrigger.getAll().forEach((t) => t.kill());
     };
@@ -63,4 +70,3 @@ export default function SmoothScroll({ children }: { children: React.ReactNode }
 
   return <>{children}</>;
 }
-

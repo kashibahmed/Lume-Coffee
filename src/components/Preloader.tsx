@@ -2,7 +2,9 @@
 
 import React, { useEffect, useRef, useState } from "react";
 import gsap from "gsap";
+import { ScrollTrigger } from "gsap/ScrollTrigger";
 import DecorativeSun from "./DecorativeSun";
+import { usePreload } from "@/context/PreloadContext";
 
 interface PreloaderProps {
   onComplete?: () => void;
@@ -39,10 +41,34 @@ export default function Preloader({ onComplete }: PreloaderProps) {
   const [showEcho, setShowEcho] = useState(false);
   const [isDone, setIsDone] = useState(false);
 
+  const { videoProgress, videoReady, markPreloaderComplete } = usePreload();
+  const videoReadyRef = useRef(false);
+  videoReadyRef.current = videoReady;
+
+  const [displayProgress, setDisplayProgress] = useState(0);
+
+  // Smoothly interpolate displayed percentage
   useEffect(() => {
-    // Lock body scroll while preloader is active
+    const target = Math.max(displayProgress, videoProgress);
+    if (target === displayProgress) return;
+
+    const diff = target - displayProgress;
+    const step = Math.max(1, Math.ceil(diff / 5));
+    const timer = setTimeout(() => {
+      setDisplayProgress((prev) => Math.min(target, prev + step));
+    }, 30);
+
+    return () => clearTimeout(timer);
+  }, [videoProgress, displayProgress]);
+
+  useEffect(() => {
+    // 1. Lock scroll and pause Lenis while preloading
     const originalOverflow = document.body.style.overflow;
     document.body.style.overflow = "hidden";
+
+    if (typeof window !== "undefined" && (window as any).__lenis) {
+      (window as any).__lenis.stop();
+    }
 
     const prefersReducedMotion = window.matchMedia(
       "(prefers-reduced-motion: reduce)"
@@ -50,50 +76,72 @@ export default function Preloader({ onComplete }: PreloaderProps) {
 
     if (prefersReducedMotion) {
       document.body.style.overflow = originalOverflow;
+      if (typeof window !== "undefined" && (window as any).__lenis) {
+        (window as any).__lenis.start();
+      }
       setIsDone(true);
+      markPreloaderComplete();
       onComplete?.();
       return;
     }
 
-    const ctx = gsap.context(() => {
-      const tl = gsap.timeline({
-        onComplete: () => {
-          // Curtain slide-up reveal
-          gsap.to(containerRef.current, {
-            yPercent: -100,
-            duration: 0.85,
-            ease: "power4.inOut",
-            onComplete: () => {
-              document.body.style.overflow = originalOverflow;
-              setIsDone(true);
-              onComplete?.();
-            },
-          });
-        },
+    let isCancelled = false;
+
+    // Curtain exit execution
+    const triggerCurtainLift = () => {
+      if (isCancelled || !containerRef.current) return;
+
+      setShowEcho(true);
+
+      gsap.delayedCall(0.35, () => {
+        if (isCancelled || !containerRef.current) return;
+
+        gsap.to(containerRef.current, {
+          yPercent: -100,
+          duration: 0.85,
+          ease: "power4.inOut",
+          onComplete: () => {
+            document.body.style.overflow = originalOverflow;
+
+            // Resume Lenis smooth scroll and refresh ScrollTrigger
+            if (typeof window !== "undefined" && (window as any).__lenis) {
+              (window as any).__lenis.start();
+            }
+            ScrollTrigger.refresh();
+
+            setIsDone(true);
+            markPreloaderComplete();
+            onComplete?.();
+          },
+        });
       });
+    };
 
-      // Phase 0: BREWING (0s -> 0.45s)
-      tl.to({}, { duration: 0.45 });
+    const ctx = gsap.context(() => {
+      const tl = gsap.timeline();
 
-      // Phase 1: ROASTING (0.45s -> 0.9s)
+      // Phase 0: BREWING (0s -> 0.4s)
+      tl.to({}, { duration: 0.4 });
+
+      // Phase 1: ROASTING (0.4s -> 0.8s)
       tl.call(() => setCurrentPhase(1));
       tl.fromTo(
         textWrapperRef.current,
         { scale: 0.92, opacity: 0.7 },
         { scale: 1, opacity: 1, duration: 0.15, ease: "power2.out" }
       );
-      tl.to({}, { duration: 0.3 });
+      tl.to({}, { duration: 0.35 });
 
-      // Phase 2: GRINDING (0.9s -> 1.35s)
+      // Phase 2: GRINDING (0.8s -> 1.25s)
       tl.call(() => setCurrentPhase(2));
       tl.fromTo(
         textWrapperRef.current,
         { scale: 0.92, opacity: 0.7 },
         { scale: 1, opacity: 1, duration: 0.15, ease: "power2.out" }
       );
-      tl.to({}, { duration: 0.3 });
+      tl.to({}, { duration: 0.35 });
 
-      // Phase 3: POURING (1.35s -> 1.85s)
+      // Phase 3: POURING (1.25s -> ...)
       tl.call(() => {
         setCurrentPhase(3);
       });
@@ -102,18 +150,31 @@ export default function Preloader({ onComplete }: PreloaderProps) {
         { scale: 0.92, opacity: 0.7 },
         { scale: 1, opacity: 1, duration: 0.15, ease: "power2.out" }
       );
-      tl.to({}, { duration: 0.35 });
+      tl.to({}, { duration: 0.3 });
 
-      // Echo expansion on POURING right before curtain lift (1.85s -> 2.25s)
-      tl.call(() => setShowEcho(true));
-      tl.to({}, { duration: 0.4 });
+      // Check if video scroll buffer is ready
+      tl.call(() => {
+        const checkReady = () => {
+          if (videoReadyRef.current) {
+            triggerCurtainLift();
+          } else {
+            // Keep checking every 60ms until buffer finishes loading
+            setTimeout(checkReady, 60);
+          }
+        };
+        checkReady();
+      });
     }, containerRef);
 
     return () => {
+      isCancelled = true;
       document.body.style.overflow = originalOverflow;
+      if (typeof window !== "undefined" && (window as any).__lenis) {
+        (window as any).__lenis.start();
+      }
       ctx.revert();
     };
-  }, [onComplete]);
+  }, [markPreloaderComplete, onComplete]);
 
   // Echo animation when showEcho becomes true
   useEffect(() => {
@@ -125,7 +186,6 @@ export default function Preloader({ onComplete }: PreloaderProps) {
       { y: 0, opacity: 0.85, scaleY: 0.9 },
       {
         y: (i) => {
-          // Stagger upwards for top layers (indices 0..3) and downwards for bottom layers (indices 4..7)
           const offsets = [-20, -40, -60, -80, 20, 40, 60, 80];
           return offsets[i] || 0;
         },
@@ -245,16 +305,31 @@ export default function Preloader({ onComplete }: PreloaderProps) {
         </div>
       </div>
 
-      {/* Bottom Subtle Tag */}
-      <div className="absolute bottom-8 left-1/2 -translate-x-1/2 opacity-70 pointer-events-none">
-        <p
-          className="font-body text-[11px] sm:text-xs tracking-[0.25em] uppercase font-semibold"
-          style={{ color: current.text }}
+      {/* Bottom Loading Progress Indicator */}
+      <div className="absolute bottom-8 sm:bottom-10 left-1/2 -translate-x-1/2 w-full max-w-xs sm:max-w-sm px-6 flex flex-col items-center gap-2 pointer-events-none">
+        <div className="w-full flex items-center justify-between text-[11px] sm:text-xs font-semibold tracking-widest uppercase opacity-85">
+          <span style={{ color: current.text }}>
+            {displayProgress < 100 ? "Brewing Experience" : "Ready to Pour"}
+          </span>
+          <span className="tabular-nums" style={{ color: current.text }}>
+            {displayProgress}%
+          </span>
+        </div>
+
+        {/* Real-time Progress Bar */}
+        <div
+          className="w-full h-1.5 rounded-full overflow-hidden border border-white/25"
+          style={{ backgroundColor: "rgba(255, 255, 255, 0.15)" }}
         >
-          Specialty Coffee Sanctuary
-        </p>
+          <div
+            className="h-full rounded-full transition-all duration-150 ease-out"
+            style={{
+              width: `${displayProgress}%`,
+              backgroundColor: current.text,
+            }}
+          />
+        </div>
       </div>
     </div>
   );
 }
-
