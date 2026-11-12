@@ -37,7 +37,10 @@ export default function Preloader({ onComplete }: PreloaderProps) {
   const containerRef = useRef<HTMLDivElement>(null);
   const textWrapperRef = useRef<HTMLDivElement>(null);
   const echoContainerRef = useRef<HTMLDivElement>(null);
+
   const [currentPhase, setCurrentPhase] = useState(0);
+  const currentPhaseRef = useRef(0);
+
   const [showEcho, setShowEcho] = useState(false);
   const [isDone, setIsDone] = useState(false);
 
@@ -46,8 +49,13 @@ export default function Preloader({ onComplete }: PreloaderProps) {
   videoReadyRef.current = videoReady;
 
   const [displayProgress, setDisplayProgress] = useState(0);
+  const displayProgressRef = useRef(0);
+  displayProgressRef.current = displayProgress;
 
-  // Smoothly interpolate displayed percentage
+  const hasCompletedFirstLoopRef = useRef(false);
+  const isExitingRef = useRef(false);
+
+  // 1. Smoothly interpolate displayed percentage up to real video progress
   useEffect(() => {
     const target = Math.max(displayProgress, videoProgress);
     if (target === displayProgress) return;
@@ -56,13 +64,33 @@ export default function Preloader({ onComplete }: PreloaderProps) {
     const step = Math.max(1, Math.ceil(diff / 5));
     const timer = setTimeout(() => {
       setDisplayProgress((prev) => Math.min(target, prev + step));
-    }, 30);
+    }, 25);
 
     return () => clearTimeout(timer);
   }, [videoProgress, displayProgress]);
 
+  // Baseline progress animation so the progress bar is always lively and moving
   useEffect(() => {
-    // 1. Lock scroll and pause Lenis while preloading
+    const interval = setInterval(() => {
+      if (videoReadyRef.current) {
+        setDisplayProgress(100);
+        return;
+      }
+      setDisplayProgress((prev) => {
+        // Softly crawl up to 92% until videoReady signals 100%
+        if (prev < 90) {
+          return prev + 1;
+        }
+        return prev;
+      });
+    }, 90);
+
+    return () => clearInterval(interval);
+  }, []);
+
+  // 2. Continuous Looping & Synchronization Controller
+  useEffect(() => {
+    // Lock scroll and stop Lenis while preloading
     const originalOverflow = document.body.style.overflow;
     document.body.style.overflow = "hidden";
 
@@ -86,14 +114,18 @@ export default function Preloader({ onComplete }: PreloaderProps) {
     }
 
     let isCancelled = false;
+    let timerId: NodeJS.Timeout | null = null;
 
-    // Curtain exit execution
+    // Trigger finale echo and smooth curtain slide-up
     const triggerCurtainLift = () => {
-      if (isCancelled || !containerRef.current) return;
+      if (isCancelled || isExitingRef.current || !containerRef.current) return;
+      isExitingRef.current = true;
 
+      // Make sure displayed progress displays 100%
+      setDisplayProgress(100);
       setShowEcho(true);
 
-      gsap.delayedCall(0.35, () => {
+      gsap.delayedCall(0.38, () => {
         if (isCancelled || !containerRef.current) return;
 
         gsap.to(containerRef.current, {
@@ -117,66 +149,65 @@ export default function Preloader({ onComplete }: PreloaderProps) {
       });
     };
 
-    const ctx = gsap.context(() => {
-      const tl = gsap.timeline();
+    // Cycle to next word in the loop
+    const stepPhase = () => {
+      if (isCancelled || isExitingRef.current) return;
 
-      // Phase 0: BREWING (0s -> 0.4s)
-      tl.to({}, { duration: 0.4 });
+      const current = currentPhaseRef.current;
+      const next = (current + 1) % PHASES.length;
 
-      // Phase 1: ROASTING (0.4s -> 0.8s)
-      tl.call(() => setCurrentPhase(1));
-      tl.fromTo(
+      // If we just wrapped from 3 (POURING) to 0 (BREWING), we have completed a full loop
+      if (current === PHASES.length - 1) {
+        hasCompletedFirstLoopRef.current = true;
+      }
+
+      // Check if we are ready to finish:
+      // We finish on "POURING" (phase 3) once the loading bar is full (>= 98%) AND videoReady is true,
+      // and we have displayed at least 1 full cycle so the user experiences the complete brand story.
+      const isBufferReady = videoReadyRef.current || displayProgressRef.current >= 99;
+      if (current === 3 && isBufferReady && hasCompletedFirstLoopRef.current) {
+        triggerCurtainLift();
+        return;
+      }
+
+      currentPhaseRef.current = next;
+      setCurrentPhase(next);
+
+      // Micro-scale entrance animation for each word
+      if (textWrapperRef.current) {
+        gsap.fromTo(
+          textWrapperRef.current,
+          { scale: 0.9, opacity: 0.75 },
+          { scale: 1, opacity: 1, duration: 0.18, ease: "power2.out" }
+        );
+      }
+
+      // Set pacing for word display:
+      // ~480ms per word gives a rhythmic, captivating, and brisk motion flow
+      timerId = setTimeout(stepPhase, 480);
+    };
+
+    // Start first word animation
+    if (textWrapperRef.current) {
+      gsap.fromTo(
         textWrapperRef.current,
-        { scale: 0.92, opacity: 0.7 },
-        { scale: 1, opacity: 1, duration: 0.15, ease: "power2.out" }
+        { scale: 0.9, opacity: 0.75 },
+        { scale: 1, opacity: 1, duration: 0.2, ease: "power2.out" }
       );
-      tl.to({}, { duration: 0.35 });
-
-      // Phase 2: GRINDING (0.8s -> 1.25s)
-      tl.call(() => setCurrentPhase(2));
-      tl.fromTo(
-        textWrapperRef.current,
-        { scale: 0.92, opacity: 0.7 },
-        { scale: 1, opacity: 1, duration: 0.15, ease: "power2.out" }
-      );
-      tl.to({}, { duration: 0.35 });
-
-      // Phase 3: POURING (1.25s -> ...)
-      tl.call(() => {
-        setCurrentPhase(3);
-      });
-      tl.fromTo(
-        textWrapperRef.current,
-        { scale: 0.92, opacity: 0.7 },
-        { scale: 1, opacity: 1, duration: 0.15, ease: "power2.out" }
-      );
-      tl.to({}, { duration: 0.3 });
-
-      // Check if video scroll buffer is ready
-      tl.call(() => {
-        const checkReady = () => {
-          if (videoReadyRef.current) {
-            triggerCurtainLift();
-          } else {
-            // Keep checking every 60ms until buffer finishes loading
-            setTimeout(checkReady, 60);
-          }
-        };
-        checkReady();
-      });
-    }, containerRef);
+    }
+    timerId = setTimeout(stepPhase, 480);
 
     return () => {
       isCancelled = true;
+      if (timerId) clearTimeout(timerId);
       document.body.style.overflow = originalOverflow;
       if (typeof window !== "undefined" && (window as any).__lenis) {
         (window as any).__lenis.start();
       }
-      ctx.revert();
     };
   }, [markPreloaderComplete, onComplete]);
 
-  // Echo animation when showEcho becomes true
+  // 3. Echo bloom animation when showEcho activates
   useEffect(() => {
     if (!showEcho || !echoContainerRef.current) return;
 
@@ -186,14 +217,14 @@ export default function Preloader({ onComplete }: PreloaderProps) {
       { y: 0, opacity: 0.85, scaleY: 0.9 },
       {
         y: (i) => {
-          const offsets = [-20, -40, -60, -80, 20, 40, 60, 80];
+          const offsets = [-22, -44, -66, -88, 22, 44, 66, 88];
           return offsets[i] || 0;
         },
         opacity: (i) => {
-          const opacities = [0.65, 0.45, 0.25, 0.12, 0.65, 0.45, 0.25, 0.12];
+          const opacities = [0.7, 0.48, 0.28, 0.12, 0.7, 0.48, 0.28, 0.12];
           return opacities[i] || 0.2;
         },
-        scaleY: 1.05,
+        scaleY: 1.06,
         duration: 0.4,
         ease: "power3.out",
         stagger: 0.02,
@@ -208,7 +239,7 @@ export default function Preloader({ onComplete }: PreloaderProps) {
   return (
     <div
       ref={containerRef}
-      className="fixed inset-0 z-[9999] flex flex-col items-center justify-center select-none overflow-hidden transition-colors duration-200"
+      className="fixed inset-0 z-[9999] flex flex-col items-center justify-center select-none overflow-hidden transition-colors duration-300"
       style={{ backgroundColor: current.bg }}
     >
       {/* Top Brand Bar */}
@@ -231,7 +262,7 @@ export default function Preloader({ onComplete }: PreloaderProps) {
         </span>
       </div>
 
-      {/* Main Kinetic Typography */}
+      {/* Main Kinetic Looping Typography */}
       <div className="relative flex items-center justify-center w-full px-4">
         {/* Echo Layers Container (activated on POURING finale) */}
         {showEcho && (
@@ -297,7 +328,7 @@ export default function Preloader({ onComplete }: PreloaderProps) {
         {/* Foreground Active Word */}
         <div ref={textWrapperRef} className="relative z-10 text-center">
           <h1
-            className="font-headline text-6xl sm:text-8xl md:text-9xl lg:text-[11rem] xl:text-[13rem] tracking-tight uppercase leading-none font-black transition-colors duration-150"
+            className="font-headline text-6xl sm:text-8xl md:text-9xl lg:text-[11rem] xl:text-[13rem] tracking-tight uppercase leading-none font-black transition-colors duration-200"
             style={{ color: current.text }}
           >
             {current.word}
@@ -305,21 +336,21 @@ export default function Preloader({ onComplete }: PreloaderProps) {
         </div>
       </div>
 
-      {/* Bottom Loading Progress Indicator */}
-      <div className="absolute bottom-8 sm:bottom-10 left-1/2 -translate-x-1/2 w-full max-w-xs sm:max-w-sm px-6 flex flex-col items-center gap-2 pointer-events-none">
-        <div className="w-full flex items-center justify-between text-[11px] sm:text-xs font-semibold tracking-widest uppercase opacity-85">
+      {/* Bottom Loading Progress Indicator - Perfectly Synced */}
+      <div className="absolute bottom-8 sm:bottom-10 left-1/2 -translate-x-1/2 w-full max-w-xs sm:max-w-sm px-6 flex flex-col items-center gap-2.5 pointer-events-none">
+        <div className="w-full flex items-center justify-between text-[11px] sm:text-xs font-semibold tracking-widest uppercase opacity-90">
           <span style={{ color: current.text }}>
             {displayProgress < 100 ? "Brewing Experience" : "Ready to Pour"}
           </span>
-          <span className="tabular-nums" style={{ color: current.text }}>
+          <span className="tabular-nums font-bold" style={{ color: current.text }}>
             {displayProgress}%
           </span>
         </div>
 
-        {/* Real-time Progress Bar */}
+        {/* Real-time Smooth Progress Bar */}
         <div
           className="w-full h-1.5 rounded-full overflow-hidden border border-white/25"
-          style={{ backgroundColor: "rgba(255, 255, 255, 0.15)" }}
+          style={{ backgroundColor: "rgba(255, 255, 255, 0.18)" }}
         >
           <div
             className="h-full rounded-full transition-all duration-150 ease-out"
