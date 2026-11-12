@@ -9,7 +9,7 @@ import { usePreload } from "@/context/PreloadContext";
 
 const TOTAL_FRAMES = 850;
 const INITIAL_BUFFER_COUNT = 15;
-const MAX_CONCURRENT_REQUESTS = 5;
+const MAX_CONCURRENT_REQUESTS = 8;
 
 export default function Hero() {
   const outerWrapperRef = useRef<HTMLDivElement>(null);
@@ -36,7 +36,6 @@ export default function Hero() {
   const currentFrameRef = useRef<number>(1);
   const lastRenderedFrameRef = useRef<number>(-1);
   const scrollDirectionRef = useRef<"down" | "up">("down");
-  const rafIdRef = useRef<number | null>(null);
 
   // Path resolver: WebP with mobile/desktop resolution
   const getFrameUrl = useCallback(
@@ -54,16 +53,22 @@ export default function Hero() {
     return `/hero-frames/frame_${padded}.jpg`;
   };
 
-  // Direct paint to Canvas
+  // Direct paint to Canvas with hardware smoothing and low latency
   const drawImageToCanvas = useCallback((img: HTMLImageElement) => {
     const canvas = canvasRef.current;
     if (!canvas) return;
-    const ctx = canvas.getContext("2d", { alpha: false });
+    const ctx = canvas.getContext("2d", {
+      alpha: false,
+      desynchronized: true,
+    });
     if (!ctx) return;
 
     const canvasWidth = canvas.width;
     const canvasHeight = canvas.height;
     if (canvasWidth <= 0 || canvasHeight <= 0) return;
+
+    ctx.imageSmoothingEnabled = true;
+    ctx.imageSmoothingQuality = "high";
 
     const imgWidth = img.naturalWidth || 1920;
     const imgHeight = img.naturalHeight || 1080;
@@ -188,6 +193,11 @@ export default function Hero() {
       const clamped = Math.max(1, Math.min(TOTAL_FRAMES, Math.round(targetIndex)));
       currentFrameRef.current = clamped;
 
+      // Avoid redundant redraw if this exact frame is already drawn on canvas
+      if (clamped === lastRenderedFrameRef.current) {
+        return;
+      }
+
       // 1. Exact match available
       if (loadedFlagsRef.current[clamped] === 1 && imagesRef.current[clamped]) {
         drawImageToCanvas(imagesRef.current[clamped]!);
@@ -223,20 +233,6 @@ export default function Hero() {
       requestFrameWithPriority(clamped);
     },
     [drawImageToCanvas, requestFrameWithPriority]
-  );
-
-  // Batched render via requestAnimationFrame to lock to display refresh
-  const queueRender = useCallback(
-    (frameIndex: number) => {
-      if (rafIdRef.current !== null) {
-        cancelAnimationFrame(rafIdRef.current);
-      }
-      rafIdRef.current = requestAnimationFrame(() => {
-        renderFrame(frameIndex);
-        rafIdRef.current = null;
-      });
-    },
-    [renderFrame]
   );
 
   // Update canvas size matching viewport and DPR
@@ -345,8 +341,8 @@ export default function Hero() {
       const isDown = direction === "down";
       const forwardStart = isDown ? current + 1 : current - 1;
       const forwardEnd = isDown
-        ? Math.min(TOTAL_FRAMES, current + 45)
-        : Math.max(1, current - 35);
+        ? Math.min(TOTAL_FRAMES, current + 65)
+        : Math.max(1, current - 50);
       const step = isDown ? 1 : -1;
 
       // 1. Immediate forward lookahead
@@ -356,8 +352,8 @@ export default function Hero() {
         }
       }
 
-      // 2. Reverse buffer (for quick backward scrubbing)
-      const backwardStart = isDown ? Math.max(1, current - 15) : Math.min(TOTAL_FRAMES, current + 15);
+      // 2. Reverse buffer (for responsive backward scrubbing)
+      const backwardStart = isDown ? Math.max(1, current - 25) : Math.min(TOTAL_FRAMES, current + 25);
       const backwardEnd = current;
       for (let i = backwardStart; i <= backwardEnd; i++) {
         if (loadedFlagsRef.current[i] === 0 && !priorityBatch.includes(i)) {
@@ -365,8 +361,8 @@ export default function Hero() {
         }
       }
 
-      // 3. Wider keyframe stride (every 4th frame) to ensure coverage
-      for (let i = Math.max(1, current - 60); i <= Math.min(TOTAL_FRAMES, current + 120); i += 4) {
+      // 3. Wider keyframe stride to ensure coverage throughout the timeline
+      for (let i = Math.max(1, current - 80); i <= Math.min(TOTAL_FRAMES, current + 150); i += 3) {
         if (loadedFlagsRef.current[i] === 0 && !priorityBatch.includes(i)) {
           backgroundBatch.push(i);
         }
@@ -379,24 +375,47 @@ export default function Hero() {
     [processLoadQueue]
   );
 
-  // Idle background loader: stream in all remaining sequence frames progressively
+  // Proactive background loader: continuously stream in remaining frames with saturated workers
   useEffect(() => {
     let isCancelled = false;
 
     const idleStreamer = setInterval(() => {
       if (isCancelled) return;
-      if (activeWorkerCountRef.current < 2 && priorityQueueRef.current.length === 0) {
-        // Find next unloaded frame
+      if (priorityQueueRef.current.length === 0) {
         const current = currentFrameRef.current;
-        for (let i = current; i <= TOTAL_FRAMES; i++) {
-          if (loadedFlagsRef.current[i] === 0 && !backgroundQueueRef.current.includes(i)) {
+        let added = 0;
+
+        // Forward stream from current frame
+        for (let i = current + 1; i <= TOTAL_FRAMES && added < 24; i++) {
+          if (
+            loadedFlagsRef.current[i] === 0 &&
+            !activeRequestsRef.current.has(i) &&
+            !backgroundQueueRef.current.includes(i)
+          ) {
             backgroundQueueRef.current.push(i);
-            break;
+            added++;
           }
         }
-        processLoadQueue();
+
+        // Backward stream to cover start
+        if (added < 24) {
+          for (let i = current - 1; i >= 1 && added < 24; i--) {
+            if (
+              loadedFlagsRef.current[i] === 0 &&
+              !activeRequestsRef.current.has(i) &&
+              !backgroundQueueRef.current.includes(i)
+            ) {
+              backgroundQueueRef.current.push(i);
+              added++;
+            }
+          }
+        }
+
+        if (added > 0) {
+          processLoadQueue();
+        }
       }
-    }, 150);
+    }, 80);
 
     return () => {
       isCancelled = true;
@@ -428,7 +447,7 @@ export default function Hero() {
         trigger: outerWrapperRef.current,
         start: "top top",
         end: "bottom bottom",
-        scrub: 0.1, // Tight, instant sync with Lenis physics
+        scrub: 0.65, // Silky smooth 650ms momentum scrub for liquid, cinematic playback
         onUpdate: (self) => {
           // Track scroll direction
           const dir = self.progress >= previousProgress ? "down" : "up";
@@ -438,8 +457,8 @@ export default function Hero() {
           // Map 0 -> 1 progress to 1 -> 850 frames accurately
           const targetFrame = Math.round(1 + self.progress * (TOTAL_FRAMES - 1));
 
-          // Render target frame
-          queueRender(targetFrame);
+          // Render target frame directly in sync with GSAP/Lenis ticker
+          renderFrame(targetFrame);
 
           // Update directional lookahead window
           scheduleLookaheadBatch(targetFrame, dir);
@@ -482,7 +501,7 @@ export default function Hero() {
     }, outerWrapperRef);
 
     return () => ctx.revert();
-  }, [queueRender, scheduleLookaheadBatch]);
+  }, [renderFrame, scheduleLookaheadBatch]);
 
   // Refresh and draw when preloader completes
   useEffect(() => {

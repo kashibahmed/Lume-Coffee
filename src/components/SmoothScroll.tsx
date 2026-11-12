@@ -13,13 +13,14 @@ export default function SmoothScroll({ children }: { children: React.ReactNode }
 
     // Initialize Lenis with smooth physics
     const lenis = new Lenis({
-      duration: 1.15,
+      duration: 1.25,
       easing: (t) => Math.min(1, 1.001 - Math.pow(2, -10 * t)),
       orientation: "vertical",
       gestureOrientation: "vertical",
       smoothWheel: true,
-      wheelMultiplier: 0.95,
-      touchMultiplier: 1.6,
+      wheelMultiplier: 1.0,
+      touchMultiplier: 1.8,
+      autoRaf: false,
     });
 
     lenisRef.current = lenis;
