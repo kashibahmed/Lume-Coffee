@@ -9,7 +9,7 @@ import { usePreload } from "@/context/PreloadContext";
 
 const TOTAL_FRAMES = 850;
 const INITIAL_BUFFER_COUNT = 15;
-const MAX_CACHE_SIZE = 100; // LRU memory limit: max 100 decoded frames in RAM (~80-120 frames per spec)
+const MAX_CONCURRENT_REQUESTS = 5;
 
 export default function Hero() {
   const outerWrapperRef = useRef<HTMLDivElement>(null);
@@ -24,15 +24,21 @@ export default function Hero() {
   const { setInitialBufferProgress, setIsInitialReady, isPreloaderComplete, isMobile } =
     usePreload();
 
-  // LRU Decoded Frames Cache: Map<frameIndex, ImageBitmap | HTMLImageElement>
-  const frameCacheRef = useRef<Map<number, ImageBitmap | HTMLImageElement>>(new Map());
+  // Master image array (indices 1 to 850)
+  const imagesRef = useRef<(HTMLImageElement | undefined)[]>([]);
+  // Uint8Array: 1 = loaded, 0 = not loaded
+  const loadedFlagsRef = useRef<Uint8Array>(new Uint8Array(TOTAL_FRAMES + 1));
   const activeRequestsRef = useRef<Set<number>>(new Set());
+  const priorityQueueRef = useRef<number[]>([]);
+  const backgroundQueueRef = useRef<number[]>([]);
+  const activeWorkerCountRef = useRef<number>(0);
+
   const currentFrameRef = useRef<number>(1);
-  const lastDrawnFrameRef = useRef<number>(-1);
+  const lastRenderedFrameRef = useRef<number>(-1);
   const scrollDirectionRef = useRef<"down" | "up">("down");
   const rafIdRef = useRef<number | null>(null);
 
-  // Helper to determine asset URL (720p WebP for mobile, 1080p WebP for desktop, with JPG fallback)
+  // Path resolver: WebP with mobile/desktop resolution
   const getFrameUrl = useCallback(
     (index: number) => {
       const padded = String(index).padStart(3, "0");
@@ -42,123 +48,25 @@ export default function Hero() {
     [isMobile]
   );
 
-  // Evict furthest frames when cache exceeds capacity (Priority 5: Memory Management)
-  const pruneCache = useCallback(() => {
-    const cache = frameCacheRef.current;
-    if (cache.size <= MAX_CACHE_SIZE) return;
+  // Fallback path resolver
+  const getFallbackUrl = (index: number) => {
+    const padded = String(index).padStart(3, "0");
+    return `/hero-frames/frame_${padded}.jpg`;
+  };
 
-    const current = currentFrameRef.current;
-    // Sort cached keys by distance from currentFrame descending
-    const keysByDistance = Array.from(cache.keys()).sort((a, b) => {
-      return Math.abs(b - current) - Math.abs(a - current);
-    });
-
-    const toRemove = cache.size - MAX_CACHE_SIZE;
-    for (let i = 0; i < toRemove; i++) {
-      const key = keysByDistance[i];
-      const item = cache.get(key);
-      if (item) {
-        // If it's an ImageBitmap, close it to free GPU memory
-        if (typeof (item as ImageBitmap).close === "function") {
-          (item as ImageBitmap).close();
-        }
-        cache.delete(key);
-      }
-    }
-  }, []);
-
-  // Fetch and decode a single frame into the LRU cache
-  const loadAndDecodeFrame = useCallback(
-    async (idx: number): Promise<ImageBitmap | HTMLImageElement | null> => {
-      if (idx < 1 || idx > TOTAL_FRAMES) return null;
-
-      const cache = frameCacheRef.current;
-      if (cache.has(idx)) {
-        return cache.get(idx)!;
-      }
-
-      if (activeRequestsRef.current.has(idx)) {
-        return null;
-      }
-
-      activeRequestsRef.current.add(idx);
-
-      try {
-        const url = getFrameUrl(idx);
-        let decoded: ImageBitmap | HTMLImageElement;
-
-        if (typeof window !== "undefined" && "createImageBitmap" in window) {
-          const res = await fetch(url);
-          if (!res.ok) throw new Error(`HTTP ${res.status}`);
-          const blob = await res.blob();
-          decoded = await createImageBitmap(blob);
-        } else {
-          decoded = await new Promise<HTMLImageElement>((resolve, reject) => {
-            const img = new Image();
-            img.src = url;
-            img.onload = () => resolve(img);
-            img.onerror = () => {
-              // Fallback to JPG if WebP fails
-              const fallback = new Image();
-              const padded = String(idx).padStart(3, "0");
-              fallback.src = `/hero-frames/frame_${padded}.jpg`;
-              fallback.onload = () => resolve(fallback);
-              fallback.onerror = reject;
-            };
-          });
-        }
-
-        cache.set(idx, decoded);
-        pruneCache();
-        return decoded;
-      } catch {
-        return null;
-      } finally {
-        activeRequestsRef.current.delete(idx);
-      }
-    },
-    [getFrameUrl, pruneCache]
-  );
-
-  // Draw a frame onto the Canvas (Priority 4)
-  const drawOnCanvas = useCallback((frameIndex: number) => {
+  // Direct paint to Canvas
+  const drawImageToCanvas = useCallback((img: HTMLImageElement) => {
     const canvas = canvasRef.current;
     if (!canvas) return;
     const ctx = canvas.getContext("2d", { alpha: false });
     if (!ctx) return;
 
-    const clamped = Math.max(1, Math.min(TOTAL_FRAMES, Math.round(frameIndex)));
-    currentFrameRef.current = clamped;
-
-    if (clamped === lastDrawnFrameRef.current) return;
-
-    // Check exact frame or closest cached neighbor in rolling window
-    let img: ImageBitmap | HTMLImageElement | undefined = frameCacheRef.current.get(clamped);
-
-    if (!img) {
-      for (let offset = 1; offset <= 30; offset++) {
-        const prev = frameCacheRef.current.get(clamped - offset);
-        if (prev) {
-          img = prev;
-          break;
-        }
-        const next = frameCacheRef.current.get(clamped + offset);
-        if (next) {
-          img = next;
-          break;
-        }
-      }
-    }
-
-    if (!img) return;
-
     const canvasWidth = canvas.width;
     const canvasHeight = canvas.height;
-    const imgWidth = "width" in img ? img.width : (img as HTMLImageElement).naturalWidth;
-    const imgHeight = "height" in img ? img.height : (img as HTMLImageElement).naturalHeight;
+    if (canvasWidth <= 0 || canvasHeight <= 0) return;
 
-    if (!imgWidth || !imgHeight) return;
-
+    const imgWidth = img.naturalWidth || 1920;
+    const imgHeight = img.naturalHeight || 1080;
     const imgRatio = imgWidth / imgHeight;
     const canvasRatio = canvasWidth / canvasHeight;
 
@@ -176,24 +84,162 @@ export default function Hero() {
     }
 
     ctx.drawImage(img, x, y, renderWidth, renderHeight);
-    lastDrawnFrameRef.current = clamped;
   }, []);
 
-  // Batched render via requestAnimationFrame
+  // Dispatch queue processor for controlled concurrent loading
+  const processLoadQueue = useCallback(() => {
+    while (
+      activeWorkerCountRef.current < MAX_CONCURRENT_REQUESTS &&
+      (priorityQueueRef.current.length > 0 || backgroundQueueRef.current.length > 0)
+    ) {
+      // Priority queue takes precedence over background queue
+      const idx =
+        priorityQueueRef.current.shift() ?? backgroundQueueRef.current.shift();
+      if (idx === undefined) break;
+
+      // Skip if already loaded or actively downloading
+      if (loadedFlagsRef.current[idx] === 1 || activeRequestsRef.current.has(idx)) {
+        continue;
+      }
+
+      activeRequestsRef.current.add(idx);
+      activeWorkerCountRef.current++;
+
+      const img = new Image();
+      const primaryUrl = getFrameUrl(idx);
+
+      const onImageSuccess = () => {
+        imagesRef.current[idx] = img;
+        loadedFlagsRef.current[idx] = 1;
+        activeRequestsRef.current.delete(idx);
+        activeWorkerCountRef.current--;
+
+        // If the newly loaded frame is the current frame, or closer to the current frame than
+        // what is currently displayed, immediately repaint!
+        const currentTarget = currentFrameRef.current;
+        const currentDrawn = lastRenderedFrameRef.current;
+        if (
+          idx === currentTarget ||
+          (currentDrawn !== -1 &&
+            Math.abs(currentTarget - idx) < Math.abs(currentTarget - currentDrawn))
+        ) {
+          drawImageToCanvas(img);
+          lastRenderedFrameRef.current = idx;
+        }
+
+        processLoadQueue();
+      };
+
+      img.onload = () => {
+        // Asynchronously decode off main thread before completing
+        if (typeof img.decode === "function") {
+          img.decode().then(onImageSuccess).catch(onImageSuccess);
+        } else {
+          onImageSuccess();
+        }
+      };
+
+      img.onerror = () => {
+        // Fallback to original JPG if WebP encounters any error
+        const fallbackImg = new Image();
+        fallbackImg.src = getFallbackUrl(idx);
+        fallbackImg.onload = () => {
+          imagesRef.current[idx] = fallbackImg;
+          loadedFlagsRef.current[idx] = 1;
+          activeRequestsRef.current.delete(idx);
+          activeWorkerCountRef.current--;
+
+          const currentTarget = currentFrameRef.current;
+          if (idx === currentTarget) {
+            drawImageToCanvas(fallbackImg);
+            lastRenderedFrameRef.current = idx;
+          }
+          processLoadQueue();
+        };
+        fallbackImg.onerror = () => {
+          activeRequestsRef.current.delete(idx);
+          activeWorkerCountRef.current--;
+          processLoadQueue();
+        };
+      };
+
+      img.src = primaryUrl;
+    }
+  }, [getFrameUrl, drawImageToCanvas]);
+
+  // Request a specific frame with immediate top priority
+  const requestFrameWithPriority = useCallback(
+    (idx: number) => {
+      if (idx < 1 || idx > TOTAL_FRAMES) return;
+      if (loadedFlagsRef.current[idx] === 1 || activeRequestsRef.current.has(idx)) return;
+
+      // Insert at the front of priority queue
+      if (!priorityQueueRef.current.includes(idx)) {
+        priorityQueueRef.current.unshift(idx);
+      }
+      processLoadQueue();
+    },
+    [processLoadQueue]
+  );
+
+  // Render frame onto canvas with closest-available neighbor fallback
+  const renderFrame = useCallback(
+    (targetIndex: number) => {
+      const clamped = Math.max(1, Math.min(TOTAL_FRAMES, Math.round(targetIndex)));
+      currentFrameRef.current = clamped;
+
+      // 1. Exact match available
+      if (loadedFlagsRef.current[clamped] === 1 && imagesRef.current[clamped]) {
+        drawImageToCanvas(imagesRef.current[clamped]!);
+        lastRenderedFrameRef.current = clamped;
+        return;
+      }
+
+      // 2. Exact match not ready: search outward for the closest available frame
+      let fallbackImg: HTMLImageElement | null = null;
+      let fallbackIndex = -1;
+
+      for (let d = 1; d < TOTAL_FRAMES; d++) {
+        const prev = clamped - d;
+        if (prev >= 1 && loadedFlagsRef.current[prev] === 1 && imagesRef.current[prev]) {
+          fallbackIndex = prev;
+          fallbackImg = imagesRef.current[prev]!;
+          break;
+        }
+        const next = clamped + d;
+        if (next <= TOTAL_FRAMES && loadedFlagsRef.current[next] === 1 && imagesRef.current[next]) {
+          fallbackIndex = next;
+          fallbackImg = imagesRef.current[next]!;
+          break;
+        }
+      }
+
+      if (fallbackImg) {
+        drawImageToCanvas(fallbackImg);
+        lastRenderedFrameRef.current = fallbackIndex;
+      }
+
+      // Request exact missing frame immediately
+      requestFrameWithPriority(clamped);
+    },
+    [drawImageToCanvas, requestFrameWithPriority]
+  );
+
+  // Batched render via requestAnimationFrame to lock to display refresh
   const queueRender = useCallback(
     (frameIndex: number) => {
       if (rafIdRef.current !== null) {
         cancelAnimationFrame(rafIdRef.current);
       }
       rafIdRef.current = requestAnimationFrame(() => {
-        drawOnCanvas(frameIndex);
+        renderFrame(frameIndex);
         rafIdRef.current = null;
       });
     },
-    [drawOnCanvas]
+    [renderFrame]
   );
 
-  // Resize canvas backing store with DPR capping to prevent VRAM explosion
+  // Update canvas size matching viewport and DPR
   const updateCanvasSize = useCallback(() => {
     const canvas = canvasRef.current;
     if (!canvas) return;
@@ -201,50 +247,81 @@ export default function Hero() {
     if (rect.width <= 0 || rect.height <= 0) return;
 
     const dpr = Math.min(window.devicePixelRatio || 1, 2);
-    // Cap backing store width to 1920 to match source resolution
     const targetWidth = Math.min(1920, Math.round(rect.width * dpr));
     const targetHeight = Math.round(targetWidth / (16 / 9));
 
     if (canvas.width !== targetWidth || canvas.height !== targetHeight) {
       canvas.width = targetWidth;
       canvas.height = targetHeight;
-      lastDrawnFrameRef.current = -1; // force redraw
-      drawOnCanvas(currentFrameRef.current);
+      lastRenderedFrameRef.current = -1; // force paint
+      renderFrame(currentFrameRef.current);
     }
-  }, [drawOnCanvas]);
+  }, [renderFrame]);
 
-  // Initial Loading Buffer (Frames 1-15 + Fonts) for Preloader (Priority 3 & 7)
+  // Initial Buffer Preloader: Frames 1 to 15 + Document Fonts
   useEffect(() => {
     let isCancelled = false;
 
+    // Initialize arrays
+    imagesRef.current = new Array(TOTAL_FRAMES + 1);
+    loadedFlagsRef.current = new Uint8Array(TOTAL_FRAMES + 1);
+
     const loadInitialBuffer = async () => {
-      // 1. Load and draw Frame 1 immediately
-      const first = await loadAndDecodeFrame(1);
-      if (isCancelled) return;
-      if (first) {
-        drawOnCanvas(1);
-      }
+      let loaded = 0;
 
-      // 2. Preload frames 2 to 15 in parallel
-      let loaded = 1;
-      const initialPromises: Promise<any>[] = [];
+      // 1. Load Frame 1 immediately
+      const firstImg = new Image();
+      firstImg.onload = () => {
+        if (isCancelled) return;
+        imagesRef.current[1] = firstImg;
+        loadedFlagsRef.current[1] = 1;
+        drawImageToCanvas(firstImg);
+        lastRenderedFrameRef.current = 1;
+        loaded++;
+        setInitialBufferProgress(Math.round((loaded / INITIAL_BUFFER_COUNT) * 100));
+      };
+      firstImg.src = getFrameUrl(1);
 
+      // 2. Preload frames 2 through 15
+      const promises: Promise<any>[] = [];
       for (let i = 2; i <= INITIAL_BUFFER_COUNT; i++) {
-        const p = loadAndDecodeFrame(i).then(() => {
-          if (!isCancelled) {
-            loaded++;
-            setInitialBufferProgress(Math.round((loaded / INITIAL_BUFFER_COUNT) * 100));
-          }
+        const p = new Promise<void>((resolve) => {
+          const img = new Image();
+          img.onload = () => {
+            if (!isCancelled) {
+              imagesRef.current[i] = img;
+              loadedFlagsRef.current[i] = 1;
+              loaded++;
+              setInitialBufferProgress(Math.round((loaded / INITIAL_BUFFER_COUNT) * 100));
+            }
+            resolve();
+          };
+          img.onerror = () => {
+            // fallback
+            const fb = new Image();
+            fb.onload = () => {
+              if (!isCancelled) {
+                imagesRef.current[i] = fb;
+                loadedFlagsRef.current[i] = 1;
+                loaded++;
+                setInitialBufferProgress(Math.round((loaded / INITIAL_BUFFER_COUNT) * 100));
+              }
+              resolve();
+            };
+            fb.onerror = () => resolve();
+            fb.src = getFallbackUrl(i);
+          };
+          img.src = getFrameUrl(i);
         });
-        initialPromises.push(p);
+        promises.push(p);
       }
 
-      // Also ensure document fonts are ready
+      // 3. Ensure document fonts are loaded
       if (typeof document !== "undefined" && document.fonts) {
-        initialPromises.push(document.fonts.ready);
+        promises.push(document.fonts.ready);
       }
 
-      await Promise.all(initialPromises);
+      await Promise.all(promises);
 
       if (!isCancelled) {
         setInitialBufferProgress(100);
@@ -257,84 +334,84 @@ export default function Hero() {
     return () => {
       isCancelled = true;
     };
-  }, [loadAndDecodeFrame, drawOnCanvas, setInitialBufferProgress, setIsInitialReady]);
+  }, [getFrameUrl, drawImageToCanvas, setInitialBufferProgress, setIsInitialReady]);
 
-  // Progressive Rolling Background Loader around currentFrame (Priority 3)
-  useEffect(() => {
-    let isCancelled = false;
-    let isWorkerRunning = false;
+  // Directional & Proximity Lookahead Frame Queue Updater
+  const scheduleLookaheadBatch = useCallback(
+    (current: number, direction: "down" | "up") => {
+      const priorityBatch: number[] = [];
+      const backgroundBatch: number[] = [];
 
-    const workerQueue: number[] = [];
-
-    // Prioritize upcoming frames based on scroll direction & proximity
-    const scheduleProximityBatch = () => {
-      if (isCancelled) return;
-      const current = currentFrameRef.current;
-      const isDown = scrollDirectionRef.current === "down";
-
-      workerQueue.length = 0; // clear stale queue
-
-      // Lookahead window (30-40 frames ahead) & Lookbehind buffer (15-20 frames behind)
+      const isDown = direction === "down";
       const forwardStart = isDown ? current + 1 : current - 1;
-      const forwardEnd = isDown ? Math.min(TOTAL_FRAMES, current + 35) : Math.max(1, current - 25);
+      const forwardEnd = isDown
+        ? Math.min(TOTAL_FRAMES, current + 45)
+        : Math.max(1, current - 35);
       const step = isDown ? 1 : -1;
 
-      // 1. Immediate neighborhood
+      // 1. Immediate forward lookahead
       for (let i = forwardStart; isDown ? i <= forwardEnd : i >= forwardEnd; i += step) {
-        if (!frameCacheRef.current.has(i) && !activeRequestsRef.current.has(i)) {
-          workerQueue.push(i);
+        if (loadedFlagsRef.current[i] === 0) {
+          priorityBatch.push(i);
         }
       }
 
-      // 2. Keyframe stride across sequence (every 3rd frame)
-      for (let i = Math.max(1, current - 50); i <= Math.min(TOTAL_FRAMES, current + 90); i += 3) {
-        if (!frameCacheRef.current.has(i) && !activeRequestsRef.current.has(i)) {
-          if (!workerQueue.includes(i)) {
-            workerQueue.push(i);
+      // 2. Reverse buffer (for quick backward scrubbing)
+      const backwardStart = isDown ? Math.max(1, current - 15) : Math.min(TOTAL_FRAMES, current + 15);
+      const backwardEnd = current;
+      for (let i = backwardStart; i <= backwardEnd; i++) {
+        if (loadedFlagsRef.current[i] === 0 && !priorityBatch.includes(i)) {
+          priorityBatch.push(i);
+        }
+      }
+
+      // 3. Wider keyframe stride (every 4th frame) to ensure coverage
+      for (let i = Math.max(1, current - 60); i <= Math.min(TOTAL_FRAMES, current + 120); i += 4) {
+        if (loadedFlagsRef.current[i] === 0 && !priorityBatch.includes(i)) {
+          backgroundBatch.push(i);
+        }
+      }
+
+      priorityQueueRef.current = priorityBatch;
+      backgroundQueueRef.current = backgroundBatch;
+      processLoadQueue();
+    },
+    [processLoadQueue]
+  );
+
+  // Idle background loader: stream in all remaining sequence frames progressively
+  useEffect(() => {
+    let isCancelled = false;
+
+    const idleStreamer = setInterval(() => {
+      if (isCancelled) return;
+      if (activeWorkerCountRef.current < 2 && priorityQueueRef.current.length === 0) {
+        // Find next unloaded frame
+        const current = currentFrameRef.current;
+        for (let i = current; i <= TOTAL_FRAMES; i++) {
+          if (loadedFlagsRef.current[i] === 0 && !backgroundQueueRef.current.includes(i)) {
+            backgroundQueueRef.current.push(i);
+            break;
           }
         }
+        processLoadQueue();
       }
-
-      runConcurrentBatch();
-    };
-
-    // Controlled concurrency pool (4-6 parallel requests)
-    const runConcurrentBatch = async () => {
-      if (isWorkerRunning || isCancelled || workerQueue.length === 0) return;
-      isWorkerRunning = true;
-
-      const CONCURRENCY = 5;
-
-      const worker = async () => {
-        while (workerQueue.length > 0 && !isCancelled) {
-          const idx = workerQueue.shift();
-          if (idx === undefined) break;
-          await loadAndDecodeFrame(idx);
-        }
-      };
-
-      const workers = Array.from({ length: CONCURRENCY }, () => worker());
-      await Promise.all(workers);
-      isWorkerRunning = false;
-    };
-
-    // Periodically update proximity buffer
-    const interval = setInterval(scheduleProximityBatch, 250);
+    }, 150);
 
     return () => {
       isCancelled = true;
-      clearInterval(interval);
+      clearInterval(idleStreamer);
     };
-  }, [loadAndDecodeFrame]);
+  }, [processLoadQueue]);
 
-  // Handle window resize
+  // Window resize handler
   useEffect(() => {
     updateCanvasSize();
     window.addEventListener("resize", updateCanvasSize, { passive: true });
     return () => window.removeEventListener("resize", updateCanvasSize);
   }, [updateCanvasSize]);
 
-  // Setup GSAP ScrollTrigger (Priority 6)
+  // GSAP ScrollTrigger Integration
   useEffect(() => {
     gsap.registerPlugin(ScrollTrigger);
 
@@ -351,24 +428,23 @@ export default function Hero() {
         trigger: outerWrapperRef.current,
         start: "top top",
         end: "bottom bottom",
-        scrub: 0.1, // Tight, buttery sync with Lenis
+        scrub: 0.1, // Tight, instant sync with Lenis physics
         onUpdate: (self) => {
-          // Track scroll direction for directional frame prioritization
-          if (self.progress > previousProgress) {
-            scrollDirectionRef.current = "down";
-          } else if (self.progress < previousProgress) {
-            scrollDirectionRef.current = "up";
-          }
+          // Track scroll direction
+          const dir = self.progress >= previousProgress ? "down" : "up";
+          scrollDirectionRef.current = dir;
           previousProgress = self.progress;
 
-          // Map 0 -> 1 progress to 1 -> 850 frames
-          const targetFrame = Math.round(
-            1 + self.progress * (TOTAL_FRAMES - 1)
-          );
+          // Map 0 -> 1 progress to 1 -> 850 frames accurately
+          const targetFrame = Math.round(1 + self.progress * (TOTAL_FRAMES - 1));
 
+          // Render target frame
           queueRender(targetFrame);
 
-          // Update HUD progress bar directly on DOM without triggering React re-renders
+          // Update directional lookahead window
+          scheduleLookaheadBatch(targetFrame, dir);
+
+          // Update DOM directly without triggering React re-renders
           if (progressBarRef.current) {
             progressBarRef.current.style.width = `${self.progress * 100}%`;
           }
@@ -378,7 +454,7 @@ export default function Hero() {
               targetFrame < TOTAL_FRAMES ? "Scroll the Journey" : "Journey Complete ↓";
           }
 
-          // Hero card fades out gracefully as scrolling starts
+          // Initial hero glass fades out gracefully as scroll starts
           if (heroCardRef.current) {
             if (self.progress < 0.16) {
               const opacity = Math.max(0, 1 - self.progress / 0.12);
@@ -406,16 +482,16 @@ export default function Hero() {
     }, outerWrapperRef);
 
     return () => ctx.revert();
-  }, [queueRender]);
+  }, [queueRender, scheduleLookaheadBatch]);
 
   // Refresh and draw when preloader completes
   useEffect(() => {
     if (isPreloaderComplete) {
       updateCanvasSize();
       ScrollTrigger.refresh();
-      drawOnCanvas(1);
+      renderFrame(1);
     }
-  }, [isPreloaderComplete, updateCanvasSize, drawOnCanvas]);
+  }, [isPreloaderComplete, updateCanvasSize, renderFrame]);
 
   return (
     <div
