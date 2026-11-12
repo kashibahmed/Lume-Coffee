@@ -118,7 +118,7 @@ export default function FinalCTA() {
                   rel="noopener noreferrer"
                   className="px-9 py-4 rounded-full bg-[#9C8E5E] text-[#FFF9F2] text-sm font-semibold tracking-wide uppercase hover:bg-[#887D47] transition-all duration-300 shadow-md hover:shadow-lg inline-flex items-center gap-2.5 group border-2 border-white/40 hover:scale-105 active:scale-95"
                 >
-                  <span className="font-headline text-lg sm:text-xl uppercase tracking-wider">VISIT CAFE</span>
+                  <span className="font-headline text-lg sm:text-xl uppercase tracking-wider">VISIT LUME</span>
                   <ArrowRight className="w-4 h-4 transition-transform duration-300 group-hover:translate-x-1.5" />
                 </a>
 

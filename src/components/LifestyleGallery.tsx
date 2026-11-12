@@ -77,7 +77,7 @@ export default function LifestyleGallery() {
           </div>
 
           <a
-            href="https://instagram.com"
+            href="https://www.instagram.com/lumecoffeeco?exln=MWd4cjNubWp3OW56dA=="
             target="_blank"
             rel="noopener noreferrer"
             className="inline-flex items-center gap-2.5 px-6 py-3.5 rounded-full bg-white border border-brand-peach/80 text-brand-olive-dark hover:bg-brand-olive-dark hover:text-brand-cream transition-all duration-300 shadow-sm text-xs font-bold tracking-wider uppercase group self-start md:self-auto"
