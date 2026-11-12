@@ -1,35 +1,47 @@
 "use client";
 
-import React, { createContext, useContext, useState, useCallback } from "react";
+import React, { createContext, useContext, useState, useCallback, useEffect } from "react";
 
 interface PreloadContextType {
-  videoProgress: number; // 0 to 100
-  videoReady: boolean;
-  isPreloaderComplete: boolean;
-  setVideoProgress: (progress: number) => void;
-  setVideoReady: (ready: boolean) => void;
+  initialBufferProgress: number; // 0 to 100% of the initial 15-frame buffer
+  isInitialReady: boolean;        // true as soon as frames 1-15 are ready
+  isPreloaderComplete: boolean;   // true once preloader curtain has lifted
+  isMobile: boolean;
+  setInitialBufferProgress: (progress: number) => void;
+  setIsInitialReady: (ready: boolean) => void;
   markPreloaderComplete: () => void;
 }
 
 const PreloadContext = createContext<PreloadContextType>({
-  videoProgress: 0,
-  videoReady: false,
+  initialBufferProgress: 0,
+  isInitialReady: false,
   isPreloaderComplete: false,
-  setVideoProgress: () => {},
-  setVideoReady: () => {},
+  isMobile: false,
+  setInitialBufferProgress: () => {},
+  setIsInitialReady: () => {},
   markPreloaderComplete: () => {},
 });
 
 export function PreloadProvider({ children }: { children: React.ReactNode }) {
-  const [videoProgress, setProgress] = useState(0);
-  const [videoReady, setReady] = useState(false);
+  const [initialBufferProgress, setProgress] = useState(0);
+  const [isInitialReady, setReady] = useState(false);
   const [isPreloaderComplete, setIsComplete] = useState(false);
+  const [isMobile, setIsMobile] = useState(false);
 
-  const setVideoProgress = useCallback((val: number) => {
+  useEffect(() => {
+    const checkMobile = () => {
+      setIsMobile(window.innerWidth < 768);
+    };
+    checkMobile();
+    window.addEventListener("resize", checkMobile, { passive: true });
+    return () => window.removeEventListener("resize", checkMobile);
+  }, []);
+
+  const setInitialBufferProgress = useCallback((val: number) => {
     setProgress((prev) => Math.max(prev, Math.min(100, Math.round(val))));
   }, []);
 
-  const setVideoReady = useCallback((ready: boolean) => {
+  const setIsInitialReady = useCallback((ready: boolean) => {
     setReady(ready);
     if (ready) setProgress(100);
   }, []);
@@ -41,11 +53,12 @@ export function PreloadProvider({ children }: { children: React.ReactNode }) {
   return (
     <PreloadContext.Provider
       value={{
-        videoProgress,
-        videoReady,
+        initialBufferProgress,
+        isInitialReady,
         isPreloaderComplete,
-        setVideoProgress,
-        setVideoReady,
+        isMobile,
+        setInitialBufferProgress,
+        setIsInitialReady,
         markPreloaderComplete,
       }}
     >
@@ -55,4 +68,3 @@ export function PreloadProvider({ children }: { children: React.ReactNode }) {
 }
 
 export const usePreload = () => useContext(PreloadContext);
-
